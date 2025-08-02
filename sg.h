@@ -26,16 +26,17 @@ void sg_frame_init(SgFrame* frame, uint w, uint h)
 
 int sg_frame_save_as_ppm(const SgFrame* frame, const char* file_path)
 {
-    FILE* f;
-
-    f = fopen(file_path, "w+");
+    FILE* f = fopen(file_path, "w+");
     if (!f) {
         perror("Could not open file");
         goto finish;
     }
 
-    fprintf(f, "P6 %u %u 255\n", frame->w, frame->h)?: ({goto finish;});
-
+    int n = fprintf(f, "P6 %u %u 255\n", frame->w, frame->h);
+    if (n < 0) {
+        perror("Could write file");
+        goto finish;
+    }
 
     for (size_t i = 0; i < frame->w * frame->h; ++i) {
         fwrite(frame->pixel+i, 3, 1, f);
@@ -52,9 +53,9 @@ void sg_fill_rect(SgFrame* frame, size_t x0, size_t y0, size_t w, size_t h,
     uint x_end = clamp_top(x0 + w, frame->w);
     uint y_end = clamp_top(y0 + h, frame->h);
 
-    for (uint j = y0; j < y_end; ++j) {
-        for (uint i = x0; i < x_end; ++i) {
-            frame->pixel[j*frame->w + i] = color;
+    for (uint y = y0; y < y_end; ++y) {
+        for (uint x = x0; x < x_end; ++x) {
+            frame->pixel[y*frame->w + x] = color;
         }
     }
 }
@@ -65,9 +66,9 @@ void sg_draw_pixel_map(SgFrame* frame, uint32_t* pixel_map, size_t x0, size_t y0
     uint x_end = clamp_top(x0 + w, frame->w);
     uint y_end = clamp_top(y0 + h, frame->h);
 
-    for (uint j = y0; j < y_end; ++j) {
-        for (uint i = x0; i < x_end; ++i) {
-            frame->pixel[j*frame->w + i] = pixel_map[(j-y0)*w + (i-x0)];
+    for (uint y = y0; y < y_end; ++y) {
+        for (uint x = x0; x < x_end; ++x) {
+            frame->pixel[y*frame->w + x] = pixel_map[(y-y0)*w + (x-x0)];
         }
     }
 }
@@ -80,39 +81,97 @@ void sg_draw_bit_map(SgFrame* frame, uint8_t* bit_map, size_t x0, size_t y0,
     uint byte_w = (w + 7) / 8;
     uint8_t byte = 0;
 
-    for (uint j = y0; j < y_end; ++j) {
-        for (uint i = x0, map_i = 0; i < x_end; ++i, ++map_i) {
-            if ((map_i & 7) == 0) byte = bit_map[(j-y0)*byte_w + map_i/8];
-            if (byte & 0x80) frame->pixel[j*frame->w + i] = color;
+    for (uint y = y0; y < y_end; ++y) {
+        for (uint x = x0, i = 0; x < x_end; ++x, ++i) {
+            if ((i & 7) == 0) byte = bit_map[(y-y0)*byte_w + i/8];
+            if (byte & 0x80) frame->pixel[y*frame->w + x] = color;
             byte <<= 1;
         }
     }
 }
 
+void sg_draw_circle_point(SgFrame* frame, int x0, int y0, int i, int j, uint32_t color)
+{
+    const int w_max = frame->w;
+    const int h_max = frame->h;
+    const int index[8][2] = {
+        {(y0 + j), (x0 + i)},
+        {(y0 + j), (x0 - i)},
+        {(y0 - j), (x0 + i)},
+        {(y0 - j), (x0 - i)},
+        {(y0 + i), (x0 + j)},
+        {(y0 + i), (x0 - j)},
+        {(y0 - i), (x0 + j)},
+        {(y0 - i), (x0 - j)},
+    };
+    for (int n = 0; n < 8; ++n) {
+        if (0 <= index[n][0] && index[n][0] < h_max &&
+            0 <= index[n][1] && index[n][1] < w_max) {
+            frame->pixel[index[n][0]*w_max + index[n][1]] = color;
+        }
+    }
+}
+
+// TODO: Rewrite.
 void sg_fill_circle(SgFrame* frame, uint x0, uint y0, uint r, uint32_t color)
 {
     uint x_end = clamp_top(x0 + r, frame->w);
     uint y_end = clamp_top(y0 + r, frame->h);
 
-    int xr = r < x0 ? -r : -x0;
-    int yr = r < y0 ? -r : -y0;
+    int rx_excess = r > x0 ? r - x0 : 0;
+    int ry_excess = r > y0 ? r - y0 : 0;
 
-    x0 = r < x0 ? x0 - r : 0;
-    y0 = r < y0 ? y0 - r : 0;
+    x0 = x0 + rx_excess - r;
+    y0 = y0 + ry_excess - r;
 
-    int y = yr;
-    for (uint j = y0; j < y_end; ++j, ++y) {
-        int x = xr;
-        for (uint i = x0; i < x_end; ++i, ++x) {
-            // x^2 + y^2 = r^2 but this is not continuous math; hence the +1.
-            uint x2y2 = (x+1)*x + (y+1)*y;
-            if (x2y2 < r*r)
-                frame->pixel[j*frame->w + i] = color;
+    int j = -r + ry_excess;
+    for (uint y = y0; y < y_end; ++y, ++j) {
+        int i = -r + rx_excess;
+        for (uint x = x0; x < x_end; ++x, ++i) {
+            // i^2 + j^2 = r^2 but this is not continuous math.
+            uint x2y2 = (i+1)*i + (j+1)*j;
+            if (x2y2 < r*r) frame->pixel[y*frame->w + x] = color;
         }
     }
 }
 
-void sg_draw_circle() {
+// https://csustan.csustan.edu/~tom/Lecture-Notes/Graphics/DDA-Circle.pdf
+void sg_draw_circle(SgFrame* frame, uint x0, uint y0, uint r, uint32_t color) {
+    int i = 0;
+    int dda_i = 1;
+    int j = r;
+    int dda_j = -2*r;
+    int d = 1 - r;
+    sg_draw_circle_point(frame, x0, y0, i, j, color);
+    while (i < j) {
+        if (d >= 0) {
+            --j;
+            dda_j += 2;
+            d += dda_j;
+        }
+        ++i;
+        dda_i += 2;
+        d += dda_i;
+        sg_draw_circle_point(frame, x0, y0, i, j, color);
+    }
+}
+
+// TODO: Doesn't draw a perfect circle.
+void sg_draw_circle2(SgFrame* frame, uint x0, uint y0, uint r, uint32_t color) {
+    int i = 0;
+    int j = r;
+    int d = 1 - r;
+    sg_draw_circle_point(frame, x0, y0, i, j, color);
+    while (i < j) {
+        ++i;
+        if (d < 0) {
+            d += 2*i + 3;
+        } else {
+            --j;
+            d += 2*(i - j) + 5;
+        }
+        sg_draw_circle_point(frame, x0, y0, i, j, color);
+    }
 }
 
 #endif
